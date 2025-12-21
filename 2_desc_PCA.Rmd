@@ -42,8 +42,6 @@ n_outcomes <- c(q2_vars_n, q3_vars_n, q4_vars_n, q5_vars_n)
 
 # Outcomes
 
-## Likert plots
-
 ```{r}
 likert_data <- data2004 %>%
   set_variable_labels(
@@ -96,6 +94,82 @@ likert_data[f_outcomes] <- lapply(f_outcomes, function(var) {
   x
 })
 ```
+
+## Tables
+
+```{r}
+likert_table <- 
+  list(
+    likert_data %>% tbl_likert(include = all_of(f_outcomes)),
+    tbl_wide_summary(
+      likert_data |> mutate(across(all_of(f_outcomes), \(x) unclass(x))),
+      statistic = c("{mean}", "{sd}", "{N_nonmiss}"),
+      type = ~ "continuous",
+      include = all_of(f_outcomes),
+      digits = ~ 1)) %>%
+  tbl_merge(tab_spanner = FALSE) %>%
+
+  # Shorten labels
+  modify_table_body(
+    ~ .x %>%
+      dplyr::mutate(
+        label = str_to_sentence(
+          str_remove(label, "^How (close|important|proud) \\.\\.\\.")
+        ))) %>%
+  
+  # Append variable name in italics
+  modify_table_body(
+    ~ .x %>%
+      dplyr::mutate(
+        label = paste0(
+          label,
+          " (***",
+          stringr::str_remove(variable, "_f$"),
+          "***)"
+        ))) %>%
+
+  # Remove null values for neutral modality
+  modify_table_body(
+    ~ .x %>%
+      dplyr::mutate(
+        stat_3_1 = dplyr::if_else(
+          stat_3_1 %in% c("0", "0 (0%)", "0.0 (0.0%)"),
+          "-",
+          stat_3_1
+        ))) %>%
+  
+  as_gt(rownames_to_stub = TRUE) %>%
+  
+  # Render italics
+  fmt_markdown(columns = "label") %>%
+  fmt(columns = "stat_3_2", fns = function(x) str_sub(x, 1, -3)) %>%
+  
+  # Grouping of questions
+  tab_row_group(label = "How close do you feel to?", rows = which(.data$variable %in% q2_vars_f), id = "close") %>%
+  tab_row_group(label = "How important do you think each of the following is?", rows = which(.data$variable %in% q3_vars_f), id = "imp") %>%
+  tab_row_group(label = "How much do you agree or disagree with the following statements?", rows = which(.data$variable %in% q4_vars_f), id = "agree") %>%
+  tab_row_group(label = "How proud are you of America in each of the following?", rows = which(.data$variable %in% q5_vars_f), id = "proud") %>%
+  row_group_order(c("close", "imp", "agree", "proud")) %>%
+  
+  # Styling  
+  tab_style(
+    style = list(
+      cell_fill(color = "lightgrey"),
+      cell_text(style = "italic", weight = "bold")),
+    location = cells_row_groups())  %>%
+  tab_style(
+    style = cell_borders(sides = "left", style = "dashed", color = "black"),
+    locations = list(
+      cells_column_labels(columns = "stat_1_1" | "stat_1_2" | "stat_3_2"),
+      cells_body(columns = "stat_1_1" | "stat_1_2" | "stat_3_2")))
+
+gtsave(
+  data = likert_table,
+  filename = "likert_table.docx",
+  path = "output/desc")
+```
+
+## Likert plots
 
 ```{r}
 plot <- gglikert(likert_data,
@@ -175,7 +249,7 @@ draw_corrplot <- function(data, title, subtitle, filename, range) {
   corrplot <- ggcorrplot(
     data,
     method = "square",
-    ggtheme = theme_dark,
+    ggtheme = theme_dark(),
     show.legend = TRUE,
     outline.color = "#636363",
     tl.cex = 8) +
@@ -216,15 +290,18 @@ draw_corrplot <- function(data, title, subtitle, filename, range) {
 
 ```{r}
 ## Histogramme de la contribution des axes à la variance totale
-screeplot <- fviz_screeplot(pca_results, addlabels = TRUE, ylim = c(0, 45), title = "") + theme_gray()
+screeplot <- fviz_screeplot(pca_results, addlabels = TRUE, title = "") +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  theme_minimal()
+
 screeplot$layers[[1]]$aes_params$fill <- "lightskyblue"
 screeplot$layers[[1]]$aes_params$colour <- "cornflowerblue"
+screeplot$layers[[1]]$aes_params$width <- 0.7
 screeplot$layers[[2]]$aes_params$colour <- "darkblue"
 screeplot$layers[[3]]$aes_params$colour <- "darkblue"
 screeplot$layers[[4]]$aes_params$colour <- "darkblue"
 screeplot$labels$x <- "Components"
 screeplot$labels$y <- "% of explained variance"
-screeplot$labels$title = "Screeplot"
 screeplot$theme$plot.title$hjust <- 0.5
 screeplot
 ggsave("output/acp/screeplot.png", plot = screeplot, width = 10, height = 6, units = "in", dpi = 300)
@@ -265,24 +342,26 @@ draw_corrplot(t(pca_results$var$contrib[, 1:10]/100), "Variable contributions to
 
 ## ... ou de graphs
 contrib_1 <- fviz_contrib(pca_results, choice = "var", axes = 1, top = 30) + 
-  theme_gray() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = NULL)
 contrib_1$layers[[1]]$aes_params$fill <- "lightskyblue"
 contrib_1$layers[[1]]$aes_params$colour <- "cornflowerblue"
 contrib_1$layers[[2]]$aes_params$colour <- "darkblue"
-contrib_1$labels$title <- "Variable contributions to the 1st component variance"
-contrib_1$theme$plot.title$hjust <- 0.5
+contrib_1$labels$title <- NULL # "Variable contributions to the 1st component variance"
+# contrib_1$theme$plot.title$hjust <- 0.5
 contrib_1
 ggsave("output/acp/contrib_axe_1.png", plot = contrib_1)
 
 contrib_2 <- fviz_contrib(pca_results, choice = "var", axes = 2, top = 30) + 
-  theme_gray() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = NULL)
 contrib_2$layers[[1]]$aes_params$fill <- "lightskyblue"
 contrib_2$layers[[1]]$aes_params$colour <- "cornflowerblue"
 contrib_2$layers[[2]]$aes_params$colour <- "darkblue"
-contrib_2$labels$title <- "Variable contributions to the 2nd component variance"
-contrib_2$theme$plot.title$hjust <- 0.5
+contrib_2$labels$title <- NULL # "Variable contributions to the 2nd component variance"
+# contrib_2$theme$plot.title$hjust <- 0.5
 contrib_2
 ggsave("output/acp/contrib_axe_2.png", plot = contrib_2)
 ```
@@ -302,7 +381,7 @@ proj_var <- fviz_pca_var(pca_results,
                          gradient.cols = c("cornflowerblue", "#E46726"),
                          title = "Variable projections on components 1 and 2", 
                          repel = TRUE) + 
-  theme_gray() +
+  theme_minimal() +
   theme(plot.title = element_text(hjust = 0.5))
 proj_var$layers <- proj_var$layers[-c(4, 5)] # removing original hline and vline
 proj_var <- proj_var +
@@ -347,4 +426,3 @@ ggsave("output/acp/proj_ind_zoom.png", plot = proj_ind)
 draw_corrplot(t(pca_results$var$cos2[, 1:5]), "Quality of outcomes variables", "representation", "output/acp/qual_rep_outc.png", range = c(0,1))
 draw_corrplot(t(pca_results$quali.sup$cos2[, 1:5]), "Quality of control variables", "representation", "output/acp/qual_rep_régr.png", range = c(0,1))
 ```
-
