@@ -196,5 +196,5 @@ def plot_cluster_profiles(
     # ax.set_title(f"Answer Patterns (mean ± {sd} sd) within the Best Partition According to the {title} Index")
     plt.tight_layout()
 
-    plt.savefig(f'output/plots/{filename}.png', format='png')
+    plt.savefig(f'output/plots/{filename}_patterns.png', format='png')
     plt.show()
