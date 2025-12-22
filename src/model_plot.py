@@ -71,9 +71,9 @@ def plot_clusters(data, pred_clust, title, filename):
     ax.axhline(y=0, color='grey', linestyle='dashed', linewidth=1)
     ax.axvline(x=0, color='grey', linestyle='dashed', linewidth=1)
     plt.legend(handles, new_labels, title="")
-    plt.xlabel(f"Dim. 1 — {explained_var[0]:.2f}%")
-    plt.ylabel(f"Dim. 2 — {explained_var[1]:.2f}%")
-    plt.title(title)
+    plt.xlabel(f"First Dim. ({explained_var[0]:.2f}%)")
+    plt.ylabel(f"Second Dim. ({explained_var[1]:.2f}%)")
+    # plt.title(title)
 
     plt.savefig(f'output/plots/{filename}.png', format='png')
     plt.show()
@@ -188,11 +188,12 @@ def plot_cluster_profiles(
     # Customize plot
     ax.set_xticks(x)
     ax.set_xticklabels(feature_names, rotation=45, ha='right')
+    ax.set_ylim(0.9, 5.1)
+    ax.set_yticks([1, 2, 3, 4, 5])
     ax.set_ylabel('Survey Answers')
     ax.legend(title='')
     ax.grid(True, axis='y', alpha=0.3)
-    ax.axhline(y=0, color='grey', linestyle='dashed', linewidth=1)
-    ax.set_title(f"Answer Patterns (mean ± {sd} sd) within the Best Partition According to the {title} Index")
+    # ax.set_title(f"Answer Patterns (mean ± {sd} sd) within the Best Partition According to the {title} Index")
     plt.tight_layout()
 
     plt.savefig(f'output/plots/{filename}.png', format='png')
