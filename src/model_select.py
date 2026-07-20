@@ -125,7 +125,14 @@ def get_gap(gap_values, model, params, index):
     if stats.size == 0:
         best_n = 'none'
     else:
-        best_n = int(stats[np.argmin(stats[:, 1]), 0])
+        # Correction de bug : Tibshirani et al. (2001) prescrivent le PLUS
+        # PETIT k satisfaisant Gap(k) >= Gap(k+1) - s(k+1). L'ancienne règle
+        # (argmin de la marge gap(k) - gap(k+1) + s(k+1)) retenait le k où le
+        # critère est tout juste vérifié — typiquement le plateau de la
+        # courbe — d'où un biais systématique vers les grands k. Les k étant
+        # parcourus en ordre croissant, la première ligne collectée est le
+        # plus petit k admissible.
+        best_n = int(stats[0, 0])
 
     return best_n
 
