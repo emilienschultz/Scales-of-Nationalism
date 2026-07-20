@@ -37,6 +37,52 @@ INDEX_SPEC = [
 ]
 
 
+def _ranked(sub, col, asc, by=("model", "n_clust")):
+    """Sort `sub` by `col` (ascending if `asc`) keeping the best row per `by`."""
+    return (
+        sub.dropna(subset=[col])
+        .sort_values(col, ascending=asc)
+        .drop_duplicates(subset=list(by))
+        .reset_index(drop=True)
+    )
+
+
+def selected_pools(all_models, candidate_models):
+    """Per-index gap-selected distance and LCA pools, ranked best-first.
+
+    The single source of truth for which solutions count as "best": shared by
+    `model_comparison_table` (display) and the app's solution picker so the two
+    never diverge. For each validity index it returns:
+
+    - the **distance** pool: gap-statistic-selected k-means / AHC
+      (`candidate_models` rows flagged `<index>_gap == 1`) plus all HDBSCAN rows
+      from `all_models` (HDBSCAN has no gap statistic), deduplicated to one best
+      row per algorithm so best and second-best are different algorithms;
+    - the **LCA** pool: gap-selected latent models, ranked by the index.
+
+    Both pools keep every column of their source rows (`model`, `params`,
+    `n_clust`, the CVIs, `max_clust_size`, …) so callers can format a table or
+    re-fit the solution.
+
+    Returns
+    -------
+    (dist_by_index, lca_by_index) : tuple[dict, dict]
+        Each maps a CVI column name to a ranked DataFrame.
+    """
+    hdbscan = all_models[all_models["model"] == "HDBSCAN"]
+    dist_by_index = {}
+    lca_by_index = {}
+    for col, _, asc in INDEX_SPEC:
+        gap_sel = candidate_models[candidate_models[f"{col}_gap"] == 1]
+        dist_pool = pd.concat(
+            [gap_sel[gap_sel["model"].isin(["kmeans", "AHC"])], hdbscan],
+            ignore_index=True,
+        )
+        dist_by_index[col] = _ranked(dist_pool, col, asc, by=["model"])
+        lca_by_index[col] = _ranked(gap_sel[gap_sel["model"] == "latent"], col, asc)
+    return dist_by_index, lca_by_index
+
+
 def model_comparison_table(
     all_models, candidate_models, n_samples, unbalanced_ratio=0.9, decimal=","
 ):
@@ -73,46 +119,16 @@ def model_comparison_table(
     pd.DataFrame with columns Section / Clustering Validity Index / Algorithm /
     Clusters Nb / Score.
     """
-    candidate_models = candidate_models.copy()
-    candidate_models["unbalanced"] = (
-        candidate_models["max_clust_size"] >= unbalanced_ratio * n_samples
-    )
-    hdbscan = all_models[all_models["model"] == "HDBSCAN"].copy()
-    hdbscan["unbalanced"] = hdbscan["max_clust_size"] >= unbalanced_ratio * n_samples
-
     def fmt_n(row):
-        return f"{int(row['n_clust'])}{'*' if row['unbalanced'] else ''}"
+        unbalanced = row["max_clust_size"] >= unbalanced_ratio * n_samples
+        return f"{int(row['n_clust'])}{'*' if unbalanced else ''}"
 
     def fmt_score(v):
         return f"{v:.2f}".replace(".", decimal)
 
-    def ranked(sub, col, asc, by=("model", "n_clust")):
-        return (
-            sub.dropna(subset=[col])
-            .sort_values(col, ascending=asc)
-            .drop_duplicates(subset=list(by))
-            .reset_index(drop=True)
-        )
-
-    # Per index, build the gap-selected distance pool (k-means / AHC + HDBSCAN)
-    # and the gap-selected LCA pool, then rank each by the index.
-    #
-    # The distance pool is deduplicated by `model` (one best row per algorithm)
-    # so the best and second-best configurations are necessarily *different*
-    # algorithms — mirroring `5_clustering_results_replic_830.ipynb`, which
-    # keeps exactly one k-means / AHC / HDBSCAN row each. Deduplicating by
-    # (model, n_clust) instead lets one algorithm — typically HDBSCAN, with its
-    # many degenerate small-k splits — occupy both slots and push the others out.
-    dist_by_index = {}
-    lca_by_index = {}
-    for col, _, asc in INDEX_SPEC:
-        gap_sel = candidate_models[candidate_models[f"{col}_gap"] == 1]
-        dist_pool = pd.concat(
-            [gap_sel[gap_sel["model"].isin(["kmeans", "AHC"])], hdbscan],
-            ignore_index=True,
-        )
-        dist_by_index[col] = ranked(dist_pool, col, asc, by=["model"])
-        lca_by_index[col] = ranked(gap_sel[gap_sel["model"] == "latent"], col, asc)
+    # Gap-selected distance / LCA pools, ranked per index. Shared with the app's
+    # solution picker via `selected_pools` so the table and the dropdown agree.
+    dist_by_index, lca_by_index = selected_pools(all_models, candidate_models)
 
     rows = []
     sections = [

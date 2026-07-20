@@ -219,6 +219,9 @@ def process_dataset(
         )
     )
     bootstrap_results = pd.concat(boot_results).reset_index(drop=True)
+    # The gap statistic only consumes the CVI columns; carrying one label
+    # vector per bootstrap fit (grid size x gap_iters rows) wastes memory.
+    bootstrap_results = bootstrap_results.drop(columns=["pred_clust"])
     bootstrap_results["params"] = bootstrap_results["params"].apply(
         lambda d: {k: v for k, v in d.items() if k not in ["NAs", "wgt"]}
     )

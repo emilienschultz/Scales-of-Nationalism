@@ -48,7 +48,11 @@ def build_latent_model(n, msrt, covar):
 
 
 def do_StepMix(data, controls, n, msrt, covar, weights = None, refit = False):
-    latent_mod = build_latent_model(n, msrt, covar)      
+    # StepMix strictly type-checks n_components against Python int, so a
+    # numpy.int64 (e.g. coming from a DataFrame column) is rejected with a
+    # misleading "value not recognized" error. Coerce to a plain int.
+    n = int(n)
+    latent_mod = build_latent_model(n, msrt, covar)
     latent_mod.fit(data, controls, weights)
     pred_clust = latent_mod.predict(data, controls)
 
