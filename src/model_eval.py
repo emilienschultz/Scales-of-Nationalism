@@ -90,21 +90,28 @@ def clust_size(pred_clust):
 # Return all model parameters and CVI at once
 def get_metrics(model, params, n, data, pred_clust, **additional_metrics):
 
-    # Remove noise
+    # Remove noise (HDBSCAN -1 labels): CVIs and cluster sizes are computed
+    # on the clustered points only, so that scores stay comparable with
+    # models that assign every point to a cluster
     noise = pred_clust == -1
     denoised_data = data[~noise]
     denoised_pred_clust = pred_clust[~noise]
+
+    if len(denoised_pred_clust) > 0:
+        min_size, max_size = clust_size(denoised_pred_clust)
+    else:
+        min_size, max_size = 0, 0
 
     base_metrics = {
         'model': model,
         'params': params,
         'n_clust': n,
-        'min_clust_size': clust_size(pred_clust)[0],
-        'max_clust_size': clust_size(pred_clust)[1],
-        'silhouette': float(sil_score(data, pred_clust)),
-        'calinski_harabasz': float(ch_score(data, pred_clust)),
-        'davies_bouldin': float(db_score(data, pred_clust)),
-        'dunn': float(dunn_score(data, pred_clust))
+        'min_clust_size': min_size,
+        'max_clust_size': max_size,
+        'silhouette': float(sil_score(denoised_data, denoised_pred_clust)),
+        'calinski_harabasz': float(ch_score(denoised_data, denoised_pred_clust)),
+        'davies_bouldin': float(db_score(denoised_data, denoised_pred_clust)),
+        'dunn': float(dunn_score(denoised_data, denoised_pred_clust))
     }
 
     base_metrics.update(additional_metrics)

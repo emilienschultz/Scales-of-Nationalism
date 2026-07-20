@@ -14,10 +14,19 @@ from stepmix.stepmix import bootstrap
 ##### Gap statistic #####
 
 def bootstrap_gap(data, controls, n, model, params, iter_num):
-    # Create a random dataset
+    # Create a random dataset. For categorical latent models the columns are
+    # integer categories min..max, so drawing on [min, max + 1) yields a
+    # discrete uniform over the observed categories once truncated to int;
+    # for continuous data (kmeans / AHC / continuous latent) the reference
+    # box must stop at the observed max
+    if model == 'latent' and 'categorical' in str(params.get('msrt', '')):
+        high = data.max(axis=0) + 1
+    else:
+        high = data.max(axis=0)
+
     rand_data = np.random.uniform(
         low=data.min(axis=0),
-        high=data.max(axis=0) + 1,
+        high=high,
         size=data.shape)
     rand_data = pd.DataFrame(rand_data, columns=data.columns)
     
@@ -69,8 +78,14 @@ def compute_gap(bootstrap_results, model_results, model, params, indices):
                 rand_ind = (rand_ind + 1) / 2
                 mod_ind = (mod_ind + 1) / 2
             
-            # Calculate gap statistic and s value
-            gap = np.log(np.mean(rand_ind)) - np.log(mod_ind)
+            # Calculate gap statistic and s value, oriented so that a larger
+            # gap always means the model beats the random reference:
+            # Davies-Bouldin is lower-is-better (Tibshirani's original
+            # orientation); silhouette, CH and Dunn are higher-is-better
+            if index == 'davies_bouldin':
+                gap = np.log(np.mean(rand_ind)) - np.log(mod_ind)
+            else:
+                gap = np.log(mod_ind) - np.log(np.mean(rand_ind))
             s = np.std(np.log(rand_ind)) * np.sqrt(1 + (1 / len(group)))
             
             # Add to row data
