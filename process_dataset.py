@@ -40,6 +40,7 @@ from tqdm import tqdm
 
 from src.model_fit import do_AHC, do_hdbscan, do_kmeans, do_StepMix
 from src.model_select import bootstrap_gap, compute_gap, get_gap
+from src.model_similarity import partition_similarity
 
 CVI = ["silhouette", "calinski_harabasz", "davies_bouldin", "dunn"]
 
@@ -53,6 +54,7 @@ def process_dataset(
     standardize=True,
     run_hdbscan=True,
     subtract_one=True,
+    n_combo=3,
     verbose=True,
 ):
     """Run the clustering robustness pipeline on a single dataframe.
@@ -82,12 +84,15 @@ def process_dataset(
         0, as StepMix expects (reproducing the notebook's
         `data2004[var_list_n] - 1`). Set False if the data is already 0-indexed.
         Ignored when `msrt='continuous'`.
+    n_combo : int
+        Size of the partition combinations scored by average pairwise AMI in
+        the similarity step (see `src.model_similarity.partition_similarity`).
     verbose : bool
         Display tqdm progress bars.
 
     Returns
     -------
-    dict with keys 'all_models', 'candidate_models', 'gap_values'.
+    dict with keys 'all_models', 'candidate_models', 'gap_values', 'similarity'.
     """
     if not isinstance(data, pd.DataFrame):
         data = pd.DataFrame(data)
@@ -287,8 +292,13 @@ def process_dataset(
             else:
                 candidate_models.loc[row_id, f"{index}_gap"] = 1
 
+    # ---------- 4. AMI similarity of the per-CVI best distance partitions ----------
+
+    similarity = partition_similarity(all_models, candidate_models, n_combo=n_combo)
+
     return {
         "all_models": all_models,
         "candidate_models": candidate_models,
         "gap_values": gap_values,
+        "similarity": similarity,
     }

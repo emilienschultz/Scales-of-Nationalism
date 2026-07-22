@@ -22,6 +22,7 @@ import streamlit as st
 from process_dataset import process_dataset
 from src.app_viz import pca_scatter, refit_labels
 from src.data_gen import SimConfig, generate_clusters
+from src.model_similarity import partition_similarity
 from src.tooling import INDEX_SPEC, model_comparison_table, selected_pools
 
 CACHE_DIR = Path(__file__).parent / "cache"
@@ -37,6 +38,7 @@ PIPE_CFG = dict(
     standardize=True,
     run_hdbscan=True,
     subtract_one=True,
+    n_combo=3,
 )
 
 st.set_page_config(page_title="Clustering robustness", layout="wide")
@@ -291,7 +293,9 @@ st.success(
     f"Run `{payload['key']}` — {src_tag}. Dataset: {df.shape[0]} × {df.shape[1]}."
 )
 
-tab_clusters, tab_table = st.tabs(["Clusters", "Best-solution comparison"])
+tab_clusters, tab_table, tab_similarity = st.tabs(
+    ["Clusters", "Best-solution comparison", "Partition similarity"]
+)
 
 with tab_clusters:
     left, right = st.columns(2)
@@ -337,4 +341,59 @@ with tab_table:
         table.to_csv(index=False).encode(),
         file_name=f"table_{payload['key']}.csv",
         mime="text/csv",
+    )
+
+with tab_similarity:
+    st.subheader("Partition similarity — average AMI of the best solutions")
+    # Recompute on the fly (cheap — a handful of stored label vectors, no
+    # re-fit) for runs cached before the similarity step existed, or cached
+    # with the old NMI-based version of it.
+    similarity = result.get("similarity")
+    if similarity is None or "pairwise_ami" not in similarity:
+        similarity = partition_similarity(
+            all_models, result["candidate_models"], n_combo=PIPE_CFG["n_combo"]
+        )
+
+    if similarity["best"] is None:
+        st.caption("Fewer than two distinct best partitions — nothing to compare.")
+    else:
+        best = similarity["best"]
+        n_shown = min(similarity["n_combo"], len(similarity["pool"]))
+        if similarity["partial"]:
+            st.warning(
+                f"Only {len(similarity['pool'])} distinct best partitions available "
+                f"(fewer than the requested combination size of "
+                f"{similarity['n_combo']}); the average AMI is computed over all "
+                f"of them."
+            )
+        st.metric(
+            f"Highest average AMI ({n_shown}-partition combination)",
+            f"{best['ami']:.3f}",
+        )
+        st.markdown(
+            f"**Indicators kept:** {best['indices']}  \n"
+            f"**Solutions:** {best['members']}"
+        )
+
+        st.markdown(f"**All {n_shown}-partition combinations**")
+        st.dataframe(
+            similarity["combos"].rename(
+                columns={
+                    "members": "Solutions",
+                    "indices": "Validity indices",
+                    "ami": "Average AMI",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.markdown("**Pairwise AMI between best partitions**")
+        st.dataframe(similarity["pairwise_ami"].round(3), use_container_width=True)
+
+    st.caption(
+        "Pool: the best distance-based solution (k-means / AHC / HDBSCAN) per "
+        "validity index, deduplicated across indices. AMI (chance-corrected: "
+        "1 = identical, ~0 = chance-level, <0 = worse than chance) is computed "
+        "on the stored pipeline labels; HDBSCAN noise counts as its own cluster."
     )
