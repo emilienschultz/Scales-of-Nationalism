@@ -350,10 +350,15 @@ with tab_table:
 with tab_similarity:
     st.subheader("Partition similarity — average AMI of the best solutions")
     # Recompute on the fly (cheap — a handful of stored label vectors, no
-    # re-fit) for runs cached before the similarity step existed, or cached
-    # with the old NMI-based version of it.
+    # re-fit) for runs cached before the similarity step existed, cached with
+    # the old NMI-based version, or cached before duplicate partitions were
+    # merged and the min pairwise AMI added (no 'ami_min' column).
     similarity = result.get("similarity")
-    if similarity is None or "pairwise_ami" not in similarity:
+    if (
+        similarity is None
+        or "pairwise_ami" not in similarity
+        or "ami_min" not in similarity["combos"].columns
+    ):
         similarity = partition_similarity(
             all_models, result["candidate_models"], n_combo=PIPE_CFG["n_combo"]
         )
@@ -370,14 +375,29 @@ with tab_similarity:
                 f"{similarity['n_combo']}); the average AMI is computed over all "
                 f"of them."
             )
-        st.metric(
+        col_mean, col_min = st.columns(2)
+        col_mean.metric(
             f"Highest average AMI ({n_shown}-partition combination)",
             f"{best['ami']:.3f}",
+        )
+        col_min.metric(
+            "Weakest pair within that combination (min AMI)",
+            f"{best['ami_min']:.3f}",
         )
         st.markdown(
             f"**Indicators kept:** {best['indices']}  \n"
             f"**Solutions:** {best['members']}"
         )
+        merged_rows = similarity["pool"][
+            similarity["pool"]["duplicates"].apply(len) > 0
+        ]
+        for _, row in merged_rows.iterrows():
+            st.info(
+                f"{' and '.join(row['duplicates'])} produced the same partition "
+                f"as {row['label']} (identical labels up to renumbering); they "
+                f"were merged into a single pool entry so duplicated solutions "
+                f"do not inflate the average AMI."
+            )
 
         st.markdown(f"**All {n_shown}-partition combinations**")
         st.dataframe(
@@ -386,6 +406,7 @@ with tab_similarity:
                     "members": "Solutions",
                     "indices": "Validity indices",
                     "ami": "Average AMI",
+                    "ami_min": "Min pairwise AMI",
                 }
             ),
             use_container_width=True,
@@ -397,7 +418,8 @@ with tab_similarity:
 
     st.caption(
         "Pool: the best distance-based solution (k-means / AHC / HDBSCAN) per "
-        "validity index, deduplicated across indices. AMI (chance-corrected: "
+        "validity index; solutions with identical partitions (across indices "
+        "or parameter settings) are merged. AMI (chance-corrected: "
         "1 = identical, ~0 = chance-level, <0 = worse than chance) is computed "
         "on the stored pipeline labels; HDBSCAN noise counts as its own cluster."
     )

@@ -16,7 +16,15 @@ Conventions:
   slightly negative = worse than chance;
 - AMI is computed on the stored `pred_clust` vectors (no re-fit), so it scores
   exactly the partitions the CVIs were computed on;
-- HDBSCAN noise points (label -1) are kept and count as one extra cluster.
+- HDBSCAN noise points (label -1) are kept and count as one extra cluster;
+- deduplication operates on the partitions themselves, not the configurations:
+  two parameter settings that converge to the same labeling (up to cluster
+  renumbering) are merged into one pool entry, so a duplicated partition
+  cannot inflate the average AMI with 1.0 self-agreement pairs. Merged
+  configurations are recorded in the entry's `duplicates` field;
+- each combination reports both the mean and the minimum of its pairwise
+  AMIs: the minimum is the weakest link, which a mean over three pairs can
+  otherwise hide.
 """
 
 from itertools import combinations
@@ -35,7 +43,24 @@ def _lookup_labels(all_models, model, params, n_clust):
         & (all_models["params"] == params)
         & (all_models["n_clust"] == n_clust)
     )
-    return np.asarray(all_models.loc[row_id, "pred_clust"].iloc[0])
+    matches = all_models.loc[row_id, "pred_clust"]
+    if matches.empty:
+        raise ValueError(f"no stored fit for {model} {params} n={n_clust}")
+    return np.asarray(matches.iloc[0])
+
+
+def _canonical(labels):
+    """Renumber `labels` by order of first appearance.
+
+    Two label vectors describe the same partition iff their canonical forms
+    are equal; -1 (HDBSCAN noise) is renumbered like any other label, matching
+    the noise-is-one-extra-cluster convention used for the AMI itself.
+    """
+    order = {}
+    for v in labels:
+        if v not in order:
+            order[v] = len(order)
+    return tuple(order[v] for v in labels)
 
 
 def partition_similarity(all_models, candidate_models, n_combo=3):
@@ -43,11 +68,13 @@ def partition_similarity(all_models, candidate_models, n_combo=3):
 
     Pools the rank-0 distance solution of each validity index (via
     `selected_pools`, the same selection the comparison table and the app
-    dropdown use), deduplicates partitions picked by several indices, then
-    scores every combination of `n_combo` partitions by its mean pairwise
-    AMI (chance-corrected mutual information). When fewer than `n_combo`
-    distinct partitions exist, the single combination of the whole pool is
-    scored instead and flagged as partial.
+    dropdown use), merges entries whose stored labelings are identical up to
+    cluster renumbering (whether picked by several indices or reached from
+    different parameter settings), then scores every combination of `n_combo`
+    distinct partitions by its mean and minimum pairwise AMI (chance-corrected
+    mutual information). When fewer than `n_combo` distinct partitions exist,
+    the single combination of the whole pool is scored instead and flagged as
+    partial.
 
     Parameters
     ----------
@@ -61,10 +88,12 @@ def partition_similarity(all_models, candidate_models, n_combo=3):
     -------
     dict with keys:
     - 'pool': one row per distinct partition (label, indices, model, params,
-      n_clust);
+      n_clust, duplicates — the labels of same-partition configurations
+      merged into the row);
     - 'pairwise_ami': symmetric DataFrame of pairwise AMIs, indexed by the
       pool labels;
-    - 'combos': one row per combination (members, indices, ami), best-first;
+    - 'combos': one row per combination (members, indices, ami, ami_min),
+      best-first by mean then minimum pairwise AMI;
     - 'best': the top row of 'combos' as a dict, or None if the pool is empty;
     - 'n_combo', 'partial': the requested size and whether the pool was too
       small to honour it.
@@ -89,11 +118,33 @@ def partition_similarity(all_models, candidate_models, n_combo=3):
             }
         pool[key]["indices"].append(label)
 
-    partitions = list(pool.values())
+    # Merge configurations that produced the same partition (identical
+    # labelings up to cluster renumbering): keeping them apart would seed the
+    # combinations with pairwise-AMI-1.0 pairs and inflate the average.
+    merged = {}
+    for p in pool.values():
+        p["pred"] = _lookup_labels(all_models, p["model"], p["params"], p["n_clust"])
+        key = _canonical(p["pred"])
+        if key in merged:
+            kept = merged[key]
+            kept["indices"].extend(
+                idx for idx in p["indices"] if idx not in kept["indices"]
+            )
+            kept["duplicates"].append(f"{p['label']} with {p['params']}")
+        else:
+            p["duplicates"] = []
+            merged[key] = p
+    partitions = list(merged.values())
+
+    def pool_frame():
+        return pd.DataFrame(
+            [{k: v for k, v in p.items() if k != "pred"} for p in partitions]
+        )
+
     empty = {
-        "pool": pd.DataFrame(partitions),
+        "pool": pool_frame(),
         "pairwise_ami": pd.DataFrame(),
-        "combos": pd.DataFrame(columns=["members", "indices", "ami"]),
+        "combos": pd.DataFrame(columns=["members", "indices", "ami", "ami_min"]),
         "best": None,
         "n_combo": n_combo,
         "partial": len(partitions) < n_combo,
@@ -101,7 +152,7 @@ def partition_similarity(all_models, candidate_models, n_combo=3):
     if len(partitions) < 2:
         return empty
 
-    # Duplicate labels can happen (same algorithm and n from different params);
+    # Duplicate labels can happen (same algorithm and n, different partitions);
     # disambiguate so the AMI matrix index stays unique.
     seen = {}
     for p in partitions:
@@ -109,10 +160,7 @@ def partition_similarity(all_models, candidate_models, n_combo=3):
         if seen[p["label"]] > 1:
             p["label"] = f"{p['label']} #{seen[p['label']]}"
 
-    labels_vec = [
-        _lookup_labels(all_models, p["model"], p["params"], p["n_clust"])
-        for p in partitions
-    ]
+    labels_vec = [p["pred"] for p in partitions]
     names = [p["label"] for p in partitions]
 
     ami = pd.DataFrame(np.eye(len(partitions)), index=names, columns=names)
@@ -131,14 +179,17 @@ def partition_similarity(all_models, candidate_models, n_combo=3):
                     idx for i in combo for idx in partitions[i]["indices"]
                 ),
                 "ami": float(np.mean(pairs)),
+                "ami_min": float(np.min(pairs)),
             }
         )
     combos = (
-        pd.DataFrame(rows).sort_values("ami", ascending=False).reset_index(drop=True)
+        pd.DataFrame(rows)
+        .sort_values(["ami", "ami_min"], ascending=False, kind="stable")
+        .reset_index(drop=True)
     )
 
     return {
-        "pool": pd.DataFrame(partitions),
+        "pool": pool_frame(),
         "pairwise_ami": ami,
         "combos": combos,
         "best": combos.iloc[0].to_dict(),
