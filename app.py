@@ -304,7 +304,7 @@ with tab_clusters:
         fig_true, pca = pca_scatter(
             df, y_true, title="Ground-truth classes", figsize=(5, 3.75)
         )
-        st.pyplot(fig_true, use_container_width=False)
+        st.pyplot(fig_true, use_container_width=True)
 
     with right:
         st.subheader("Best / second-best solution")
@@ -323,9 +323,13 @@ with tab_clusters:
                     payload["key"], row["model"], row["params_str"], row["n_clust"], df
                 )
             fig_pred, _ = pca_scatter(
-                df, labels, title=f"{row['model']} (n={int(row['n_clust'])})", pca=pca
+                df,
+                labels,
+                title=f"{row['model']} (n={int(row['n_clust'])})",
+                pca=pca,
+                figsize=(5, 3.75),
             )
-            st.pyplot(fig_pred)
+            st.pyplot(fig_pred, use_container_width=True)
 
 with tab_table:
     st.subheader("Model comparison — best & second-best by validity index")
