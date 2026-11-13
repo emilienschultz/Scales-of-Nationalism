@@ -16,6 +16,7 @@ import pickle
 import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -109,7 +110,7 @@ def best_solutions(all_models, candidate_models):
 
     Uses the same gap-statistic-based selection as `model_comparison_table` (via
     the shared `selected_pools` helper) but keeps the underlying (model, params,
-    n_clust) so each solution can be re-fit and plotted. This guarantees the
+    n_clust) so each solution can be looked up and plotted. This guarantees the
     "Solution to visualize" dropdown offers exactly the solutions shown in the
     comparison panel. Returns a deduplicated DataFrame of distance-based best
     (rank 0) and second-best (rank 1) solutions plus the best LCA, across all
@@ -167,6 +168,24 @@ def cached_refit(run_key, model, params_str, n_clust, _df):
         msrt=PIPE_CFG["msrt"],
         subtract_one=PIPE_CFG["subtract_one"],
     )
+
+
+def solution_labels(all_models, row, run_key, df):
+    """Labels of the fit the pipeline actually scored for a `best_solutions` row.
+
+    k-means and StepMix are unseeded, so a re-fit can land on a different
+    partition than the one behind the CVIs in the comparison table. Read the
+    stored `pred_clust` instead; re-fit only for runs cached before it existed.
+    """
+    if "pred_clust" in all_models.columns:
+        hit = all_models[
+            (all_models["model"] == row["model"])
+            & (all_models["params"] == row["params"])
+            & (all_models["n_clust"] == row["n_clust"])
+        ]
+        if not hit.empty:
+            return np.asarray(hit["pred_clust"].iloc[0])
+    return cached_refit(run_key, row["model"], row["params_str"], row["n_clust"], df)
 
 
 # --------------------------- sidebar form ---------------------------
@@ -318,10 +337,8 @@ with tab_clusters:
             )
             choice = st.selectbox("Solution to visualize", sols["label"].tolist())
             row = sols[sols["label"] == choice].iloc[0]
-            with st.spinner("Re-fitting selected solution…"):
-                labels = cached_refit(
-                    payload["key"], row["model"], row["params_str"], row["n_clust"], df
-                )
+            with st.spinner("Loading selected solution…"):
+                labels = solution_labels(all_models, row, payload["key"], df)
             fig_pred, _ = pca_scatter(
                 df,
                 labels,
@@ -349,19 +366,13 @@ with tab_table:
 
 with tab_similarity:
     st.subheader("Partition similarity — average AMI of the best solutions")
-    # Recompute on the fly (cheap — a handful of stored label vectors, no
-    # re-fit) for runs cached before the similarity step existed, cached with
-    # the old NMI-based version, or cached before duplicate partitions were
-    # merged and the min pairwise AMI added (no 'ami_min' column).
-    similarity = result.get("similarity")
-    if (
-        similarity is None
-        or "pairwise_ami" not in similarity
-        or "ami_min" not in similarity["combos"].columns
-    ):
-        similarity = partition_similarity(
-            all_models, result["candidate_models"], n_combo=PIPE_CFG["n_combo"]
-        )
+    # Always recomputed from the stored label vectors (cheap, no re-fit) rather
+    # than read from the cached result, so this tab uses the same selection
+    # (`selected_pools`, including the HDBSCAN noise cap) as the table and the
+    # dropdown even for runs cached under an older selection rule.
+    similarity = partition_similarity(
+        all_models, result["candidate_models"], n_combo=PIPE_CFG["n_combo"]
+    )
 
     if similarity["best"] is None:
         st.caption("Fewer than two distinct best partitions — nothing to compare.")

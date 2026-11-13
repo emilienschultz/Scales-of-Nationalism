@@ -7,7 +7,9 @@ configurations (k-means / AHC / HDBSCAN) plus the best LCA model, shown apart.
 Selection mirrors `5_clustering_results_replic_830.ipynb`:
 - k-means / AHC / latent are restricted to the **gap-statistic-selected**
   candidates (`candidate_models` rows where `<index>_gap == 1`);
-- HDBSCAN (no gap statistic) is taken from `all_models` directly;
+- HDBSCAN (no gap statistic) is taken from `all_models` directly, keeping only
+  fits with at most `MAX_NOISE` percent of noise points (this cap is not in
+  the notebook);
 - the distance pool keeps **one best row per algorithm** (the notebook holds
   exactly one k-means / AHC / HDBSCAN row each), so best and second-best are
   always different algorithms.
@@ -47,7 +49,14 @@ def _ranked(sub, col, asc, by=("model", "n_clust")):
     )
 
 
-def selected_pools(all_models, candidate_models):
+# HDBSCAN fits leaving more than this share (%) of the sample as noise are not
+# eligible as "best" solutions: the CVIs only score the clustered points, so a
+# handful of tight points next to an almost-all-noise sample would otherwise
+# outrank partitions of the whole sample.
+MAX_NOISE = 50
+
+
+def selected_pools(all_models, candidate_models, max_noise=MAX_NOISE):
     """Per-index gap-selected distance and LCA pools, ranked best-first.
 
     The single source of truth for which solutions count as "best": shared by
@@ -56,8 +65,9 @@ def selected_pools(all_models, candidate_models):
 
     - the **distance** pool: gap-statistic-selected k-means / AHC
       (`candidate_models` rows flagged `<index>_gap == 1`) plus all HDBSCAN rows
-      from `all_models` (HDBSCAN has no gap statistic), deduplicated to one best
-      row per algorithm so best and second-best are different algorithms;
+      from `all_models` (HDBSCAN has no gap statistic) whose noise share is at
+      most `max_noise` percent (None disables the cap), deduplicated to one
+      best row per algorithm so best and second-best are different algorithms;
     - the **LCA** pool: gap-selected latent models, ranked by the index.
 
     Both pools keep every column of their source rows (`model`, `params`,
@@ -70,6 +80,8 @@ def selected_pools(all_models, candidate_models):
         Each maps a CVI column name to a ranked DataFrame.
     """
     hdbscan = all_models[all_models["model"] == "HDBSCAN"]
+    if max_noise is not None and "noise" in hdbscan.columns:
+        hdbscan = hdbscan[hdbscan["noise"] <= max_noise]
     dist_by_index = {}
     lca_by_index = {}
     for col, _, asc in INDEX_SPEC:
@@ -98,7 +110,8 @@ def model_comparison_table(
     A "configuration" is one (algorithm, n_clust) pair; among duplicate
     parameter grids that yield the same (algorithm, n_clust) the best-scoring
     one is kept. A `*` flags unbalanced solutions where the largest cluster
-    holds at least `unbalanced_ratio` of all individuals.
+    (or the HDBSCAN noise pool) holds at least `unbalanced_ratio` of all
+    individuals.
 
     Parameters
     ----------
@@ -120,7 +133,13 @@ def model_comparison_table(
     Clusters Nb / Score.
     """
     def fmt_n(row):
-        unbalanced = row["max_clust_size"] >= unbalanced_ratio * n_samples
+        # `max_clust_size` excludes HDBSCAN noise, so also flag solutions whose
+        # noise pool (`noise`, in % of the sample) holds that share of the
+        # individuals: a few tiny clusters next to ~all points left as noise.
+        noise = row.get("noise")
+        unbalanced = row["max_clust_size"] >= unbalanced_ratio * n_samples or (
+            pd.notna(noise) and noise >= 100 * unbalanced_ratio
+        )
         return f"{int(row['n_clust'])}{'*' if unbalanced else ''}"
 
     def fmt_score(v):

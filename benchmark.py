@@ -174,7 +174,7 @@ def solution_labels(df, all_models, row, pipe_cfg):
 # Bump when the summary schema or logic changes: cached payloads carry their
 # version, and stale summaries are recomputed from the stored labels (cheap —
 # no refit) instead of being silently reused.
-SUMMARY_VERSION = 2
+SUMMARY_VERSION = 3
 
 
 def summarize_run(df, y_true, result, pipe_cfg):

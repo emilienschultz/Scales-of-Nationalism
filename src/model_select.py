@@ -25,6 +25,11 @@ def bootstrap_gap(data, controls, n, model, params, iter_num):
         low=data.min(axis=0),
         high=high,
         size=data.shape)
+    # StepMix truncates floats to integer categories, so floor the categorical
+    # null explicitly: the CVIs are then computed on the same integer data the
+    # model was fitted on (as for the real data), not on the continuous draw.
+    if categorical:
+        rand_data = np.floor(rand_data)
     rand_data = pd.DataFrame(rand_data, columns=data.columns)
     
     # Fit the model
@@ -39,6 +44,11 @@ def bootstrap_gap(data, controls, n, model, params, iter_num):
     elif model == 'AHC':
         res = do_AHC(rand_data, n, **params)
     
+    # The gap statistic only consumes the CVIs: drop the label vector here, in
+    # the worker, so grid size x gap_iters partitions are never sent back or
+    # held in memory (about 1 GB at the full-replication settings).
+    res.pop('pred_clust', None)
+
     # Add iteration number
     res = pd.DataFrame([res])
     res['bootstrap_iter'] = iter_num + 1

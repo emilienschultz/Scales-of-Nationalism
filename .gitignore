@@ -12,7 +12,8 @@
 .png
 .docx
 
-.pyc
+*.pyc
+*.pkl
 
 .DS_Store
 .ipynb_checkpoints
