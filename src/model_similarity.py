@@ -1,4 +1,7 @@
-"""Partition-similarity (average AMI) step run after the gap-statistic selection.
+"""Partition-similarity (average AMI) step run after the gap-statistic selection,
+and the best-fits grid (`best_fits_nmi`, pairwise NMI of the top fits per index
+and the true classes; see its docstring — the conventions below describe
+`partition_similarity`).
 
 The comparison table reports the best partition per clustering validity index,
 but says nothing about whether those "best" partitions agree with each other.
@@ -31,9 +34,10 @@ from itertools import combinations
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import adjusted_mutual_info_score
+from sklearn.metrics import adjusted_mutual_info_score, normalized_mutual_info_score
 
-from src.tooling import ALGO_NAMES, INDEX_SPEC, selected_pools
+from src.model_eval import ch_score, db_score, dunn_score, sil_score
+from src.tooling import ALGO_NAMES, INDEX_SPEC, MAX_NOISE, eligible_fits, selected_pools
 
 
 def _lookup_labels(all_models, model, params, n_clust):
@@ -63,7 +67,7 @@ def _canonical(labels):
     return tuple(order[v] for v in labels)
 
 
-def partition_similarity(all_models, candidate_models, n_combo=3):
+def partition_similarity(all_models, candidate_models, n_combo=3, max_noise=MAX_NOISE):
     """Average-AMI homogeneity of the per-CVI best distance-based partitions.
 
     Pools the rank-0 distance solution of each validity index (via
@@ -83,6 +87,8 @@ def partition_similarity(all_models, candidate_models, n_combo=3):
         `all_models['pred_clust']`, so no re-fit is needed).
     n_combo : int
         Number of partitions per combination.
+    max_noise : float or None
+        HDBSCAN noise cap in percent, passed to `selected_pools`.
 
     Returns
     -------
@@ -98,7 +104,7 @@ def partition_similarity(all_models, candidate_models, n_combo=3):
     - 'n_combo', 'partial': the requested size and whether the pool was too
       small to honour it.
     """
-    dist_by_index, _ = selected_pools(all_models, candidate_models)
+    dist_by_index, _ = selected_pools(all_models, candidate_models, max_noise=max_noise)
 
     # Best distance solution per index, deduplicated across indices.
     pool = {}
@@ -196,3 +202,171 @@ def partition_similarity(all_models, candidate_models, n_combo=3):
         "n_combo": n_combo,
         "partial": len(partitions) < n_combo,
     }
+
+
+# Short index codes for compact fit labels.
+INDEX_SHORT = {
+    "silhouette": "SL",
+    "calinski_harabasz": "CH",
+    "davies_bouldin": "DB",
+    "dunn": "GD43",
+}
+TRUTH_LABEL = "True classes"
+
+
+_INDEX_FUNCS = {
+    "silhouette": sil_score,
+    "calinski_harabasz": ch_score,
+    "davies_bouldin": db_score,
+    "dunn": dunn_score,
+}
+
+
+def _rescore_latent(pools, all_models, data_n):
+    """Re-rank `eligible_fits` pools with LCA scored on the standardized data.
+
+    The pipeline computes the validity indices of categorical LCA fits on the
+    raw data it was fitted on, and those of k-means / AHC / HDBSCAN on the
+    standardized data. The values are not on the same scale (raw-data values
+    are typically higher), so a common ranking would favour LCA. Here each
+    latent row's index value is recomputed from its stored labels on
+    `data_n`, the matrix the other algorithms were scored on; the gap
+    selection of the LCA fits themselves is left untouched.
+    """
+    data_n = np.asarray(data_n, dtype=float)
+    cache = {}
+    out = {}
+    for col, _, asc in INDEX_SPEC:
+        pool = pools[col].copy()
+        for i in pool.index[pool["model"] == "latent"]:
+            r = pool.loc[i]
+            key = (str(r["params"]), int(r["n_clust"]), col)
+            if key not in cache:
+                pred = _lookup_labels(all_models, "latent", r["params"], int(r["n_clust"]))
+                cache[key] = float(_INDEX_FUNCS[col](data_n, pred))
+            pool.loc[i, col] = cache[key]
+        out[col] = (
+            pool.dropna(subset=[col])
+            .sort_values(col, ascending=asc, kind="stable")
+            .reset_index(drop=True)
+        )
+    return out
+
+
+def best_fits_nmi(
+    all_models,
+    candidate_models,
+    y_true=None,
+    n_best=4,
+    max_noise=MAX_NOISE,
+    data_n=None,
+):
+    """Pairwise NMI between the `n_best` best fits of each validity index.
+
+    For every validity index, ranks all eligible fits together, whatever the
+    algorithm (`eligible_fits`: gap-selected k-means / AHC / LCA and HDBSCAN
+    under the `max_noise` cap, the same eligibility as `selected_pools`), and keeps
+    the `n_best` best *distinct partitions*: up to 4 indices x 4 = 16 fits.
+    Many parameter settings converge to the same labeling (up to cluster
+    renumbering) and tie on the index; they count as one fit, represented by
+    the first setting in rank order, with the number of settings merged in
+    `n_configs` and the algorithms that reach it in `algorithms`. Without this the top of every index would be one partition
+    repeated. When `y_true` is given, the true partition is added as a first
+    entry, so the matrix also shows how close each fit is to the ground truth.
+
+    Partitions are only merged within an index: the grid is read index by
+    index, so a partition ranked by two indices appears twice (with a pairwise
+    NMI of 1). Conventions as in `partition_similarity`: stored `pred_clust`
+    vectors (no re-fit), noise (-1, in the fits or in `y_true`) counted as one
+    extra cluster. An index with fewer than `n_best` distinct eligible
+    partitions contributes fewer fits.
+
+    NMI (arithmetic normalization, sklearn default) runs from 0 to 1 and,
+    unlike the AMI used by `partition_similarity`, is not corrected for
+    chance: unrelated partitions score above 0, the more so the more clusters
+    they have.
+
+    `data_n` is the standardized data the distance-based models were scored
+    on. When given, LCA fits are ranked on index values recomputed on it from
+    their stored labels (`_rescore_latent`), so the four algorithms compete on
+    the same scale; without it LCA keeps the pipeline values, computed on the
+    raw categorical data and not comparable with the others.
+
+    Returns
+    -------
+    dict with keys:
+    - 'fits': one row per fit (label, index, index_key, rank, model, params,
+      n_clust, score, noise — the share (%) of points labelled -1 —, n_configs, algorithms, and `nmi_truth` when `y_true` is given, plus
+      `nmi_truth_classes` — the same NMI restricted to the points that have a
+      true class — when `y_true` contains noise points), in grid order;
+    - 'nmi': symmetric DataFrame of pairwise NMIs indexed by the labels, with
+      `TRUTH_LABEL` first when `y_true` is given.
+    """
+    pools = eligible_fits(all_models, candidate_models, max_noise=max_noise)
+    if data_n is not None:
+        pools = _rescore_latent(pools, all_models, data_n)
+
+    fits, preds = [], []
+    for col, index_label, _ in INDEX_SPEC:
+        kept = {}  # canonical partition -> fit entry, in rank order
+        for _, r in pools[col].iterrows():
+            n_clust = int(r["n_clust"])
+            pred = _lookup_labels(all_models, r["model"], r["params"], n_clust)
+            key = _canonical(pred)
+            if key in kept:
+                kept[key]["n_configs"] += 1
+                if ALGO_NAMES[r["model"]] not in kept[key]["algorithms"]:
+                    kept[key]["algorithms"].append(ALGO_NAMES[r["model"]])
+                continue
+            if len(kept) == n_best:
+                continue  # keep scanning only to complete the `n_configs` counts
+            rank = len(kept) + 1
+            kept[key] = {
+                "label": (
+                    f"{INDEX_SHORT[col]} #{rank} · "
+                    f"{ALGO_NAMES[r['model']]} (n={n_clust})"
+                ),
+                "index": index_label,
+                "index_key": col,
+                "rank": rank,
+                "model": r["model"],
+                "params": r["params"],
+                "n_clust": n_clust,
+                "score": float(r[col]),
+                "noise": 100 * float(np.mean(pred == -1)),
+                "n_configs": 1,
+                "algorithms": [ALGO_NAMES[r["model"]]],
+            }
+            preds.append(pred)
+        fits.extend(kept.values())
+
+    names = [f["label"] for f in fits]
+    if y_true is not None:
+        names = [TRUTH_LABEL] + names
+        preds = [np.asarray(y_true)] + preds
+
+    nmi = pd.DataFrame(np.eye(len(names)), index=names, columns=names)
+    for i, j in combinations(range(len(names)), 2):
+        v = normalized_mutual_info_score(preds[i], preds[j])
+        nmi.iloc[i, j] = nmi.iloc[j, i] = v
+
+    fits = pd.DataFrame(
+        fits,
+        columns=[
+            "label", "index", "index_key", "rank", "model", "params",
+            "n_clust", "score", "noise", "n_configs", "algorithms",
+        ],
+    )
+    if y_true is not None:
+        fits["nmi_truth"] = nmi.loc[fits["label"], TRUTH_LABEL].to_numpy()
+        # k-means / AHC / LCA cannot output noise, so with random points in
+        # the scenario (y_true == -1) they cannot reach 1 on `nmi_truth` even
+        # when every real class is recovered. Also score the fits on the
+        # points that do have a true class.
+        has_class = preds[0] != -1
+        if not has_class.all() and has_class.any():
+            fits["nmi_truth_classes"] = [
+                normalized_mutual_info_score(preds[0][has_class], p[has_class])
+                for p in preds[1:]
+            ]
+    return {"fits": fits, "nmi": nmi}

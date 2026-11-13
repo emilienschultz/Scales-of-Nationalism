@@ -21,10 +21,12 @@ import pandas as pd
 import streamlit as st
 
 from process_dataset import process_dataset
-from src.app_viz import pca_scatter, refit_labels
+from sklearn.preprocessing import StandardScaler
+
+from src.app_viz import nmi_heatmap, pca_scatter, refit_labels
 from src.data_gen import SimConfig, generate_clusters
-from src.model_similarity import partition_similarity
-from src.tooling import INDEX_SPEC, model_comparison_table, selected_pools
+from src.model_similarity import TRUTH_LABEL, best_fits_nmi, partition_similarity
+from src.tooling import INDEX_SPEC, MAX_NOISE, model_comparison_table, selected_pools
 
 CACHE_DIR = Path(__file__).parent / "cache"
 CACHE_DIR.mkdir(exist_ok=True)
@@ -105,7 +107,7 @@ def list_cached():
 # --------------------------- solution selection ---------------------------
 
 
-def best_solutions(all_models, candidate_models):
+def best_solutions(all_models, candidate_models, max_noise=MAX_NOISE):
     """Recover the best / second-best / best-LCA rows behind the comparison table.
 
     Uses the same gap-statistic-based selection as `model_comparison_table` (via
@@ -116,7 +118,9 @@ def best_solutions(all_models, candidate_models):
     (rank 0) and second-best (rank 1) solutions plus the best LCA, across all
     validity indices.
     """
-    dist_by_index, lca_by_index = selected_pools(all_models, candidate_models)
+    dist_by_index, lca_by_index = selected_pools(
+        all_models, candidate_models, max_noise=max_noise
+    )
 
     rows = []
     for col, label, _ in INDEX_SPEC:
@@ -228,6 +232,18 @@ with st.sidebar:
 
     run_clicked = st.button("▶ Run treatment", type="primary", use_container_width=True)
 
+    st.header("Selection of best solutions")
+    # Display-time setting: it filters the stored fits, so it is not part of
+    # the cache key and changing it never triggers a new run.
+    max_noise = st.slider(
+        "HDBSCAN maximum noise (%)",
+        0, 100, MAX_NOISE, step=5,
+        help="HDBSCAN fits leaving more than this share of the sample as noise "
+        "cannot be picked as a best solution (table, plotted solutions, "
+        "similarity and best-fits grid). 100 removes the cap. Applies "
+        "immediately to the loaded run, without re-running it.",
+    )
+
 data_cfg = dict(
     n_samples=int(n_samples),
     n_features=int(n_features),
@@ -312,8 +328,13 @@ st.success(
     f"Run `{payload['key']}` — {src_tag}. Dataset: {df.shape[0]} × {df.shape[1]}."
 )
 
-tab_clusters, tab_table, tab_similarity = st.tabs(
-    ["Clusters", "Best-solution comparison", "Partition similarity"]
+tab_clusters, tab_table, tab_similarity, tab_truth = st.tabs(
+    [
+        "Clusters",
+        "Best-solution comparison",
+        "Partition similarity",
+        "Best fits vs true classes",
+    ]
 )
 
 with tab_clusters:
@@ -327,7 +348,7 @@ with tab_clusters:
 
     with right:
         st.subheader("Best / second-best solution")
-        sols = best_solutions(all_models, result["candidate_models"])
+        sols = best_solutions(all_models, result["candidate_models"], max_noise)
         if sols.empty:
             st.caption("No gap-selectable solutions for this run.")
         else:
@@ -351,7 +372,7 @@ with tab_clusters:
 with tab_table:
     st.subheader("Model comparison — best & second-best by validity index")
     table = model_comparison_table(
-        all_models, result["candidate_models"], n_samples=len(df)
+        all_models, result["candidate_models"], n_samples=len(df), max_noise=max_noise
     )
     st.dataframe(
         table.set_index(["Section", "Clustering Validity Index"]),
@@ -360,7 +381,7 @@ with tab_table:
     st.download_button(
         "Download table (CSV)",
         table.to_csv(index=False).encode(),
-        file_name=f"table_{payload['key']}.csv",
+        file_name=f"table_{payload['key']}_noise{max_noise}.csv",
         mime="text/csv",
     )
 
@@ -370,11 +391,23 @@ with tab_similarity:
     # than read from the cached result, so this tab uses the same selection
     # (`selected_pools`, including the HDBSCAN noise cap) as the table and the
     # dropdown even for runs cached under an older selection rule.
-    similarity = partition_similarity(
-        all_models, result["candidate_models"], n_combo=PIPE_CFG["n_combo"]
-    )
+    if "pred_clust" in all_models.columns:
+        similarity = partition_similarity(
+            all_models,
+            result["candidate_models"],
+            n_combo=PIPE_CFG["n_combo"],
+            max_noise=max_noise,
+        )
+    else:
+        similarity = None
+        st.caption(
+            "This run was cached before the partitions were stored — re-run the "
+            "scenario to compare its partitions."
+        )
 
-    if similarity["best"] is None:
+    if similarity is None:
+        pass
+    elif similarity["best"] is None:
         st.caption("Fewer than two distinct best partitions — nothing to compare.")
     else:
         best = similarity["best"]
@@ -433,4 +466,93 @@ with tab_similarity:
         "or parameter settings) are merged. AMI (chance-corrected: "
         "1 = identical, ~0 = chance-level, <0 = worse than chance) is computed "
         "on the stored pipeline labels; HDBSCAN noise counts as its own cluster."
+    )
+
+with tab_truth:
+    st.subheader("Four best fits per validity index vs true classes (NMI)")
+    # Computed from the stored label vectors (cheap, no re-fit), with the same
+    # eligibility rule as the table and the dropdown (`eligible_fits`).
+    if "pred_clust" in all_models.columns:
+        # Standardized data, as the pipeline builds it for the distance-based
+        # models: LCA is re-scored on it so all algorithms rank on one scale.
+        data_n = StandardScaler().fit_transform(df) if PIPE_CFG["standardize"] else df
+        grid = best_fits_nmi(
+            all_models,
+            result["candidate_models"],
+            y_true=y_true,
+            max_noise=max_noise,
+            data_n=data_n,
+        )
+        fits = grid["fits"]
+    else:
+        fits = None
+
+    if fits is None:
+        st.caption(
+            "This run was cached before the partitions were stored — re-run the "
+            "scenario to compare its fits."
+        )
+    elif fits.empty:
+        st.caption("No eligible fit for this run.")
+    else:
+        groups = fits["index_key"].tolist()
+        if TRUTH_LABEL in grid["nmi"].index:
+            groups = [TRUTH_LABEL] + groups
+        st.pyplot(nmi_heatmap(grid["nmi"], groups=groups), use_container_width=False)
+
+        st.markdown("**Agreement of each fit with the true classes**")
+        st.dataframe(
+            fits.assign(
+                model=fits["model"].map(
+                    {"kmeans": "K-means", "AHC": "AHC", "HDBSCAN": "HDBSCAN", "latent": "LCA"}
+                ),
+                params=fits["params"].astype(str),
+                algorithms=fits["algorithms"].str.join(", "),
+            )[
+                ["index", "rank", "model", "n_clust", "noise", "score"]
+                + [c for c in ["nmi_truth", "nmi_truth_classes"] if c in fits.columns]
+                + ["n_configs", "algorithms", "params"]
+            ]
+            .sort_values(
+                "nmi_truth" if "nmi_truth" in fits.columns else "index",
+                ascending=False,
+                kind="stable",
+            )
+            .rename(
+                columns={
+                    "index": "Validity index",
+                    "rank": "Rank",
+                    "n_configs": "Settings giving this partition",
+                    "algorithms": "Reached by",
+                    "model": "Algorithm",
+                    "n_clust": "Clusters Nb",
+                    "score": "Index score",
+                    "noise": "Noise (%)",
+                    "nmi_truth": "NMI with true classes",
+                    "nmi_truth_classes": "NMI without random points",
+                    "params": "Parameters",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
+        with st.expander("Pairwise NMI matrix (table)"):
+            st.dataframe(grid["nmi"].round(3), use_container_width=True)
+
+    st.caption(
+        "For each validity index, the four best distinct partitions across "
+        "all algorithms (gap-selected k-means / AHC / LCA; HDBSCAN with at "
+        f"most {max_noise}% noise), compared with each other and with the true classes. "
+        "Parameter settings that give the same partition count as one fit "
+        "(best-ranked setting shown, 'Reached by' lists the algorithms). For this ranking the LCA index values are recomputed on the "
+        "standardized data, like the other algorithms (the comparison table keeps "
+        "the raw-data values). 'Noise (%)' is the share of the sample a fit leaves "
+        "unclassified: the index score only describes the remaining points. NMI runs from 0 to 1 (1 = identical) and is not corrected for chance, "
+        "so unrelated partitions score above 0, more so with many clusters; it is "
+        "computed on the stored pipeline labels; noise points (HDBSCAN noise, "
+        "random points of the scenario) count as their own cluster, so with "
+        "random points k-means / AHC / LCA cannot reach 1 against the true "
+        "classes: the 'NMI without random points' column scores the same fits "
+        "on the points that have a true class. A partition ranked by several "
+        "indices appears once per index."
     )

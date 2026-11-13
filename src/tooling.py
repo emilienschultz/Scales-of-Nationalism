@@ -8,8 +8,8 @@ Selection mirrors `5_clustering_results_replic_830.ipynb`:
 - k-means / AHC / latent are restricted to the **gap-statistic-selected**
   candidates (`candidate_models` rows where `<index>_gap == 1`);
 - HDBSCAN (no gap statistic) is taken from `all_models` directly, keeping only
-  fits with at most `MAX_NOISE` percent of noise points (this cap is not in
-  the notebook);
+  fits with at most `max_noise` percent of noise points (default `MAX_NOISE`;
+  this cap is not in the notebook);
 - the distance pool keeps **one best row per algorithm** (the notebook holds
   exactly one k-means / AHC / HDBSCAN row each), so best and second-best are
   always different algorithms.
@@ -56,12 +56,47 @@ def _ranked(sub, col, asc, by=("model", "n_clust")):
 MAX_NOISE = 50
 
 
+def _eligible(all_models, candidate_models, col, max_noise):
+    """Rows eligible as "best" for index `col`: (gap-selected, capped HDBSCAN)."""
+    hdbscan = all_models[all_models["model"] == "HDBSCAN"]
+    if max_noise is not None and "noise" in hdbscan.columns:
+        hdbscan = hdbscan[hdbscan["noise"] <= max_noise]
+    gap_sel = candidate_models[candidate_models[f"{col}_gap"] == 1]
+    return gap_sel, hdbscan
+
+
+def eligible_fits(all_models, candidate_models, max_noise=MAX_NOISE):
+    """Every eligible fit per index, all algorithms together, ranked best-first.
+
+    Same eligibility as `selected_pools` (gap-selected k-means / AHC / LCA,
+    HDBSCAN under the noise cap) but without the one-row-per-algorithm
+    deduplication and with LCA in the same ranking: the pool to use for a
+    "top N across all algorithms" selection. Ties keep the pool order
+    (k-means / AHC / LCA candidates first, then HDBSCAN).
+
+    Returns
+    -------
+    dict mapping a CVI column name to a ranked DataFrame.
+    """
+    out = {}
+    for col, _, asc in INDEX_SPEC:
+        gap_sel, hdbscan = _eligible(all_models, candidate_models, col, max_noise)
+        out[col] = (
+            pd.concat([gap_sel, hdbscan], ignore_index=True)
+            .dropna(subset=[col])
+            .sort_values(col, ascending=asc, kind="stable")
+            .reset_index(drop=True)
+        )
+    return out
+
+
 def selected_pools(all_models, candidate_models, max_noise=MAX_NOISE):
     """Per-index gap-selected distance and LCA pools, ranked best-first.
 
-    The single source of truth for which solutions count as "best": shared by
-    `model_comparison_table` (display) and the app's solution picker so the two
-    never diverge. For each validity index it returns:
+    Which solutions count as "best": shared by `model_comparison_table`
+    (display), the app's solution picker and `partition_similarity` so they
+    never diverge. The eligibility rule itself lives in `_eligible`, also used
+    by `eligible_fits`. For each validity index it returns:
 
     - the **distance** pool: gap-statistic-selected k-means / AHC
       (`candidate_models` rows flagged `<index>_gap == 1`) plus all HDBSCAN rows
@@ -79,13 +114,10 @@ def selected_pools(all_models, candidate_models, max_noise=MAX_NOISE):
     (dist_by_index, lca_by_index) : tuple[dict, dict]
         Each maps a CVI column name to a ranked DataFrame.
     """
-    hdbscan = all_models[all_models["model"] == "HDBSCAN"]
-    if max_noise is not None and "noise" in hdbscan.columns:
-        hdbscan = hdbscan[hdbscan["noise"] <= max_noise]
     dist_by_index = {}
     lca_by_index = {}
     for col, _, asc in INDEX_SPEC:
-        gap_sel = candidate_models[candidate_models[f"{col}_gap"] == 1]
+        gap_sel, hdbscan = _eligible(all_models, candidate_models, col, max_noise)
         dist_pool = pd.concat(
             [gap_sel[gap_sel["model"].isin(["kmeans", "AHC"])], hdbscan],
             ignore_index=True,
@@ -96,7 +128,12 @@ def selected_pools(all_models, candidate_models, max_noise=MAX_NOISE):
 
 
 def model_comparison_table(
-    all_models, candidate_models, n_samples, unbalanced_ratio=0.9, decimal=","
+    all_models,
+    candidate_models,
+    n_samples,
+    unbalanced_ratio=0.9,
+    decimal=",",
+    max_noise=MAX_NOISE,
 ):
     """Build the Table 2 model-comparison frame from `process_dataset` output.
 
@@ -126,6 +163,8 @@ def model_comparison_table(
         Largest-cluster share above which a model is flagged with `*`.
     decimal : str
         Decimal separator for the formatted scores (',' for French style).
+    max_noise : float or None
+        HDBSCAN noise cap in percent, passed to `selected_pools`.
 
     Returns
     -------
@@ -147,7 +186,9 @@ def model_comparison_table(
 
     # Gap-selected distance / LCA pools, ranked per index. Shared with the app's
     # solution picker via `selected_pools` so the table and the dropdown agree.
-    dist_by_index, lca_by_index = selected_pools(all_models, candidate_models)
+    dist_by_index, lca_by_index = selected_pools(
+        all_models, candidate_models, max_noise=max_noise
+    )
 
     rows = []
     sections = [

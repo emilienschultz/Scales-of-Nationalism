@@ -1,11 +1,13 @@
 """Visualisation and re-fit helpers for the Streamlit robustness app (`app.py`).
 
-Two functions:
+Three functions:
 
 - `pca_scatter` projects a feature frame to 2-D with PCA and plots it coloured
   by a label vector, returning the figure *and* the fitted PCA so a prediction
   can be drawn in the exact same projection as the ground truth. Noise points
   (label `-1`, from HDBSCAN) are drawn as grey stars.
+- `nmi_heatmap` draws a pairwise NMI matrix (best fits and true classes) as an
+  annotated heatmap.
 - `refit_labels` re-runs a single (model, params, n_clust) solution to recover
   its cluster assignments. It reproduces the per-model preprocessing of
   `process_dataset` (standardisation for distance models, `-1` shift for
@@ -15,7 +17,7 @@ Two functions:
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from matplotlib.colors import Normalize
+from matplotlib.colors import LinearSegmentedColormap, Normalize
 from scipy.spatial import ConvexHull
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
@@ -130,6 +132,86 @@ def pca_scatter(data, labels, title=None, pca=None, figsize=(8, 6)):
 
     fig.tight_layout()
     return fig, pca
+
+
+# Heatmap styling: one-hue sequential ramp (light = no agreement, dark =
+# identical partitions) on the same surface / ink colours as plot_benchmark.
+_SEQ_BLUE = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
+_SURFACE = "#fcfcfb"
+_INK = "#0b0b0b"
+_INK_2 = "#52514e"
+_DIAGONAL = "#f0efec"
+
+
+def nmi_heatmap(nmi, groups=None, figsize=(9.5, 8)):
+    """Heatmap of a pairwise NMI matrix (as returned by `best_fits_nmi`).
+
+    Parameters
+    ----------
+    nmi : pd.DataFrame
+        Symmetric matrix of pairwise NMIs, labels as index and columns.
+    groups : sequence, optional
+        One group key per row (e.g. the validity index of each fit); a wider
+        gap is drawn wherever the key changes, so blocks read as units.
+
+    Colour runs from 0 to 1, the range of NMI. The diagonal (trivially 1) is greyed
+    out so it does not compete with the off-diagonal cells.
+    """
+    n = len(nmi)
+    values = nmi.to_numpy(dtype=float)
+    shown = np.ma.masked_where(np.eye(n, dtype=bool), np.clip(values, 0, 1))
+
+    cmap = LinearSegmentedColormap.from_list("seq_blue", _SEQ_BLUE)
+    cmap.set_bad(_DIAGONAL)
+
+    fig, ax = plt.subplots(figsize=figsize, facecolor=_SURFACE)
+    mesh = ax.pcolormesh(
+        shown, cmap=cmap, vmin=0, vmax=1, edgecolors=_SURFACE, linewidth=1.5
+    )
+    ax.invert_yaxis()
+    ax.set_aspect("equal")
+
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            v = values[i, j]
+            txt = f"{v:.2f}"
+            if txt == "-0.00":
+                txt = "0.00"
+            elif txt == "1.00" and v < 1 - 1e-12:
+                txt = ">0.99"  # 1.00 is reserved for identical partitions
+            ax.text(
+                j + 0.5, i + 0.5, txt,
+                ha="center", va="center", fontsize=6.5,
+                color="white" if v >= 0.6 else _INK,
+            )
+
+    if groups is not None:
+        groups = list(groups)
+        if len(groups) != n:
+            raise ValueError(f"groups has {len(groups)} entries for {n} rows")
+        for k in range(1, n):
+            if groups[k] != groups[k - 1]:
+                ax.axhline(k, color=_SURFACE, lw=5)
+                ax.axvline(k, color=_SURFACE, lw=5)
+
+    ticks = np.arange(n) + 0.5
+    ax.set_xticks(ticks, nmi.columns, rotation=90, fontsize=7.5, color=_INK_2)
+    ax.set_yticks(ticks, nmi.index, fontsize=7.5, color=_INK_2)
+    ax.xaxis.tick_top()
+    ax.tick_params(length=0)
+    for side in ax.spines.values():
+        side.set_visible(False)
+    ax.set_facecolor(_SURFACE)
+
+    cbar = fig.colorbar(mesh, ax=ax, fraction=0.035, pad=0.02)
+    cbar.set_label("Normalized Mutual Information", fontsize=8, color=_INK_2)
+    cbar.ax.tick_params(labelsize=7, colors=_INK_2, length=0)
+    cbar.outline.set_visible(False)
+
+    fig.tight_layout()
+    return fig
 
 
 def refit_labels(
