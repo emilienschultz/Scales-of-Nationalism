@@ -23,6 +23,10 @@ Differences from `4_clustering.ipynb`
 --------------------------------------
 Kept here so the divergence from the notebook can be tracked over time.
 
+Selection rule: the optimal n per configuration follows `model_select.get_gap`
+(beat the uniform null, minimum cluster size, smallest k within one s of the
+highest gap), not the notebook's rule.
+
 Structural (by design — this runs on an arbitrary numeric frame, not the GSS):
 - No data prep / I/O. Takes a DataFrame in, returns dicts out (the notebook
   reads `data2004_*.parquet` and writes `output/models/*.csv`).
@@ -39,7 +43,7 @@ from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
 from src.model_fit import do_AHC, do_hdbscan, do_kmeans, do_StepMix
-from src.model_select import bootstrap_gap, compute_gap, get_gap
+from src.model_select import bootstrap_gap, compute_gap, select_candidates
 from src.model_similarity import partition_similarity
 
 CVI = ["silhouette", "calinski_harabasz", "davies_bouldin", "dunn"]
@@ -240,54 +244,10 @@ def process_dataset(
 
     # ---------- 3. Identify the optimal n per (model, params) ----------
 
-    cols = ["model", "params", "n_clust"] + list(CVI) + [f"{idx}_gap" for idx in CVI]
-    candidate_models = pd.DataFrame(columns=cols)
-    candidate_models["model"] = candidate_models["model"].astype("object")
-    candidate_models["params"] = candidate_models["params"].astype("object")
-
-    for model, config in model_grid:
-        for index in CVI:
-            best_n = get_gap(gap_values, model, config, index)
-            if best_n == "none":
-                continue
-
-            row_id = (
-                (candidate_models["model"] == model)
-                & (candidate_models["params"] == config)
-                & (candidate_models["n_clust"] == best_n)
-            )
-
-            if candidate_models[row_id].empty:
-                model_id = (
-                    (gap_models["model"] == model)
-                    & (gap_models["params"] == config)
-                    & (gap_models["n_clust"] == best_n)
-                )
-                new_row = {
-                    "model": model,
-                    "params": config,
-                    "n_clust": best_n,
-                    "min_clust_size": gap_models.loc[model_id, "min_clust_size"].values[
-                        0
-                    ],
-                    "max_clust_size": gap_models.loc[model_id, "max_clust_size"].values[
-                        0
-                    ],
-                    "silhouette": gap_models.loc[model_id, "silhouette"].values[0],
-                    "calinski_harabasz": gap_models.loc[
-                        model_id, "calinski_harabasz"
-                    ].values[0],
-                    "davies_bouldin": gap_models.loc[model_id, "davies_bouldin"].values[
-                        0
-                    ],
-                    "dunn": gap_models.loc[model_id, "dunn"].values[0],
-                    f"{index}_gap": 1,
-                }
-                candidate_models = pd.concat(
-                    [candidate_models, pd.DataFrame([new_row])], ignore_index=True
-                )
-            else:
-                candidate_models.loc[row_id, f"{index}_gap"] = 1
+    # Rule in `get_gap`: beat the uniform null, no cluster under the minimum
+    # size, smallest k within one s of the highest gap. Empty when no
+    # configuration beats the null.
+    candidate_models = select_candidates(all_models, gap_values, indices=CVI)
 
     # ---------- 4. AMI similarity of the per-CVI best distance partitions ----------
 

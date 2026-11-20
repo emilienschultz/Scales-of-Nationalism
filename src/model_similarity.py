@@ -37,7 +37,14 @@ import pandas as pd
 from sklearn.metrics import adjusted_mutual_info_score, normalized_mutual_info_score
 
 from src.model_eval import ch_score, db_score, dunn_score, sil_score
-from src.tooling import ALGO_NAMES, INDEX_SPEC, MAX_NOISE, eligible_fits, selected_pools
+from src.tooling import (
+    ALGO_NAMES,
+    INDEX_SPEC,
+    MAX_NOISE,
+    MIN_CLUSTER_SHARE,
+    eligible_fits,
+    selected_pools,
+)
 
 
 def _lookup_labels(all_models, model, params, n_clust):
@@ -67,7 +74,13 @@ def _canonical(labels):
     return tuple(order[v] for v in labels)
 
 
-def partition_similarity(all_models, candidate_models, n_combo=3, max_noise=MAX_NOISE):
+def partition_similarity(
+    all_models,
+    candidate_models,
+    n_combo=3,
+    max_noise=MAX_NOISE,
+    min_share=MIN_CLUSTER_SHARE,
+):
     """Average-AMI homogeneity of the per-CVI best distance-based partitions.
 
     Pools the rank-0 distance solution of each validity index (via
@@ -89,6 +102,9 @@ def partition_similarity(all_models, candidate_models, n_combo=3, max_noise=MAX_
         Number of partitions per combination.
     max_noise : float or None
         HDBSCAN noise cap in percent, passed to `selected_pools`.
+    min_share : float or None
+        Smallest admissible cluster as a share of the sample, passed to
+        `selected_pools`.
 
     Returns
     -------
@@ -104,7 +120,9 @@ def partition_similarity(all_models, candidate_models, n_combo=3, max_noise=MAX_
     - 'n_combo', 'partial': the requested size and whether the pool was too
       small to honour it.
     """
-    dist_by_index, _ = selected_pools(all_models, candidate_models, max_noise=max_noise)
+    dist_by_index, _ = selected_pools(
+        all_models, candidate_models, max_noise=max_noise, min_share=min_share
+    )
 
     # Best distance solution per index, deduplicated across indices.
     pool = {}
@@ -260,6 +278,7 @@ def best_fits_nmi(
     n_best=4,
     max_noise=MAX_NOISE,
     data_n=None,
+    min_share=MIN_CLUSTER_SHARE,
 ):
     """Pairwise NMI between the `n_best` best fits of each validity index.
 
@@ -302,7 +321,9 @@ def best_fits_nmi(
     - 'nmi': symmetric DataFrame of pairwise NMIs indexed by the labels, with
       `TRUTH_LABEL` first when `y_true` is given.
     """
-    pools = eligible_fits(all_models, candidate_models, max_noise=max_noise)
+    pools = eligible_fits(
+        all_models, candidate_models, max_noise=max_noise, min_share=min_share
+    )
     if data_n is not None:
         pools = _rescore_latent(pools, all_models, data_n)
 

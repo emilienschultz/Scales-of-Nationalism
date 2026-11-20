@@ -7,6 +7,7 @@ from kneed import KneeLocator
 from scipy.stats import chi2, chi2_contingency
 from sklearn.base import clone
 from src.model_fit import build_latent_model, do_StepMix, do_kmeans, do_AHC, do_hdbscan
+from src.tooling import MIN_CLUSTER_SHARE, min_cluster_size
 from stepmix.stepmix import bootstrap
 
 
@@ -111,40 +112,91 @@ def compute_gap(bootstrap_results, model_results, model, params, indices):
     return gap_values
 
 
-def get_gap(gap_values, model, params, index):
-    # Subset gap_values to the right model and params
+def get_gap(gap_values, model, params, index, sizes=None, min_size=None):
+    """Optimal n for one (model, params) and one index, or 'none'.
+
+    Rule (diverges from the notebooks and from the earlier versions here):
+
+    1. a k is admissible only if its gap exceeds the spread of the null,
+       gap(k) > s(k): the fit must score better than fits on uniform data.
+       Without this the gap was only read for its shape, so a k was returned
+       even on structureless data (all gaps negative);
+    2. when `sizes` (smallest cluster size, indexed by n_clust) and `min_size`
+       are given, a k is admissible only if its smallest cluster has at least
+       `min_size` members. This removes the outlier splits (829 / 1) that beat
+       the box null only because the null has no tails;
+    3. among the admissible k, return the smallest one whose gap is within one
+       s of the highest gap: gap(k) >= gap(k*) - s(k*), k* = argmax (the
+       "globalSEmax" rule of R's cluster::maxSE). Tibshirani's original rule
+       (smallest k with gap(k) >= gap(k+1) - s(k+1)) assumes a gap rising up
+       to the true k, which holds for the within-dispersion but not for the
+       validity indices: with 4 well separated classes the index often dips
+       at k=3, and that rule then stopped at k=2.
+
+    Returns 'none' when no k is admissible.
+    """
     rows_id = ((gap_values['model'] == model) & (gap_values['params'] == params))
-    df = gap_values[rows_id].reset_index(drop=True)
+    df = gap_values[rows_id].sort_values('n_clust').reset_index(drop=True)
 
-    # Extract gap and s values
-    gap = df[f'{index}_gs']
-    s = df[f'{index}_s']
+    gap = df[f'{index}_gs'].astype(float)
+    s = df[f'{index}_s'].astype(float)
 
-    # Select rows such that GS(k) >= GS(k+1) - s(k+1)
-    # Skipping the last row and adjusting for index-based calculations
-    n_min = df['n_clust'].min()
-    stats = []
-    
-    for i in range(0, len(df) - 1):
-        stat = gap[i] - gap[i+1] + s[i+1]
-        if stat >= 0: 
-            stats.append([i+n_min, stat])
+    # NaN gaps (k=1, undefined indices) compare False and drop out here
+    ok = gap > s
+    if sizes is not None and min_size is not None:
+        ok &= df['n_clust'].map(sizes).ge(min_size)
+    if not ok.any():
+        return 'none'
 
-    # Return optimal cluster number
-    stats = np.array(stats)
-    if stats.size == 0:
-        best_n = 'none'
-    else:
-        # Correction de bug : Tibshirani et al. (2001) prescrivent le PLUS
-        # PETIT k satisfaisant Gap(k) >= Gap(k+1) - s(k+1). L'ancienne règle
-        # (argmin de la marge gap(k) - gap(k+1) + s(k+1)) retenait le k où le
-        # critère est tout juste vérifié — typiquement le plateau de la
-        # courbe — d'où un biais systématique vers les grands k. Les k étant
-        # parcourus en ordre croissant, la première ligne collectée est le
-        # plus petit k admissible.
-        best_n = int(stats[0, 0])
+    i_max = gap[ok].idxmax()
+    threshold = gap[i_max] - s[i_max]
+    return int(df.loc[ok & (gap >= threshold), 'n_clust'].min())
 
-    return best_n
+
+CVI_COLUMNS = ('silhouette', 'calinski_harabasz', 'davies_bouldin', 'dunn')
+
+
+def select_candidates(all_models, gap_values, min_share=MIN_CLUSTER_SHARE,
+                      indices=CVI_COLUMNS):
+    """Gap-selected (model, params, n_clust) rows, flagged per index.
+
+    One row per selected fit, with its sizes and index values copied from
+    `all_models` and a `<index>_gap` column set to 1 for every index that
+    selected it (NaN otherwise). Uses only stored outputs (`gap_values`,
+    `all_models`), so it can be re-run on a cached result to apply the current
+    selection rule or another `min_share` without re-fitting anything.
+
+    `min_share` is the smallest admissible cluster, as a share of the sample
+    (see `get_gap` and `tooling.min_cluster_size`). The frame is empty when no
+    configuration beats the uniform null.
+    """
+    min_size = min_cluster_size(all_models, min_share)
+    kept = ['min_clust_size', 'max_clust_size', *indices]
+    rows = {}
+
+    configs = gap_values[['model', 'params']].assign(
+        _p=gap_values['params'].astype(str)
+    ).drop_duplicates(['model', '_p'])
+
+    for model, config in zip(configs['model'], configs['params']):
+        fits = all_models[
+            (all_models['model'] == model) & (all_models['params'] == config)
+        ]
+        sizes = fits.set_index('n_clust')['min_clust_size']
+        for index in indices:
+            best_n = get_gap(gap_values, model, config, index, sizes, min_size)
+            if best_n == 'none':
+                continue
+            key = (model, str(config), best_n)
+            if key not in rows:
+                fit = fits[fits['n_clust'] == best_n].iloc[0]
+                rows[key] = {'model': model, 'params': config, 'n_clust': best_n,
+                             **{c: fit[c] for c in kept}}
+            rows[key][f'{index}_gap'] = 1
+
+    columns = ['model', 'params', 'n_clust', *kept,
+               *[f'{index}_gap' for index in indices]]
+    return pd.DataFrame(list(rows.values()), columns=columns)
 
 
 

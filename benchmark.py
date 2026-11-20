@@ -62,6 +62,7 @@ from sklearn.metrics import adjusted_rand_score
 from process_dataset import process_dataset
 from src.app_viz import refit_labels
 from src.data_gen import SimConfig, generate_clusters
+from src.model_select import select_candidates
 from src.tooling import INDEX_SPEC, selected_pools
 
 # --------------------------- scenario grid ---------------------------
@@ -174,7 +175,7 @@ def solution_labels(df, all_models, row, pipe_cfg):
 # Bump when the summary schema or logic changes: cached payloads carry their
 # version, and stale summaries are recomputed from the stored labels (cheap —
 # no refit) instead of being silently reused.
-SUMMARY_VERSION = 3
+SUMMARY_VERSION = 4
 
 
 def summarize_run(df, y_true, result, pipe_cfg):
@@ -188,7 +189,10 @@ def summarize_run(df, y_true, result, pipe_cfg):
     exactly the partition behind each recorded score.
     """
     all_models = result["all_models"]
-    dist_by_index, lca_by_index = selected_pools(all_models, result["candidate_models"])
+    # Selection recomputed from the stored gap values, so runs cached under an
+    # older selection rule follow the current one (no re-fit).
+    candidates = select_candidates(all_models, result["gap_values"])
+    dist_by_index, lca_by_index = selected_pools(all_models, candidates)
 
     rows = []
     for col, label, _ in INDEX_SPEC:

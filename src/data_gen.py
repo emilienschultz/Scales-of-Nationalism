@@ -21,8 +21,12 @@ class SimConfig:
     """
     n_samples: int = 830            # respondents
     n_features: int = 23            # Likert items
-    n_informative: int = 4          # features carrying real cluster signal
-    n_redundant: int = 4            # linear combos of the informative features
+    n_informative: int = 23         # features carrying real cluster signal (all
+                                    # of them: with few informative features the
+                                    # classes are unevenly spaced and diluted by
+                                    # the noise features, and the validity
+                                    # indices then favour a coarser split)
+    n_redundant: int = 0            # linear combos of the informative features
     n_classes: int = 4              # B&D headline = 4 latent classes
     n_clusters_per_class: int = 1   # one Gaussian blob per class
     class_balance: tuple | None = None  # relative cluster sizes; None = equal.

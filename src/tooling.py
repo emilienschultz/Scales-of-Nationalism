@@ -10,6 +10,8 @@ Selection mirrors `5_clustering_results_replic_830.ipynb`:
 - HDBSCAN (no gap statistic) is taken from `all_models` directly, keeping only
   fits with at most `max_noise` percent of noise points (default `MAX_NOISE`;
   this cap is not in the notebook);
+- every eligible fit has all its clusters above `min_share` of the sample
+  (default `MIN_CLUSTER_SHARE`; not in the notebook either);
 - the distance pool keeps **one best row per algorithm** (the notebook holds
   exactly one k-means / AHC / HDBSCAN row each), so best and second-best are
   always different algorithms.
@@ -19,6 +21,8 @@ breaks the LCA row in particular: the raw silhouette/CH/etc. over latent models
 with k=1..16 picks whichever k maximises the index (usually a degenerate
 2-class solution), not the gap-selected k the working paper reports.
 """
+
+import math
 
 import pandas as pd
 
@@ -56,16 +60,43 @@ def _ranked(sub, col, asc, by=("model", "n_clust")):
 MAX_NOISE = 50
 
 
-def _eligible(all_models, candidate_models, col, max_noise):
+# A cluster holding less than this share of the sample does not count as a
+# cluster: a fit containing one is not eligible as a "best" solution. Without
+# it, partitions that isolate one outlier (829 / 1) or a couple of duplicates
+# win Davies-Bouldin and Dunn, and beat the uniform null only because the null
+# has no tails. Applied to the gap selection (`model_select.get_gap`) and to
+# HDBSCAN (`_eligible`).
+MIN_CLUSTER_SHARE = 0.01
+
+
+def min_cluster_size(all_models, min_share=MIN_CLUSTER_SHARE):
+    """Smallest admissible cluster, in points, for a share of the sample.
+
+    The sample size is read from the stored label vectors. `min_share` of 0 or
+    None gives 1, which disables the filter.
+    """
+    if not min_share or "pred_clust" not in all_models.columns:
+        return 1
+    n_samples = len(all_models["pred_clust"].iloc[0])
+    # round() first: 0.05 * 800 is 40.000000000000004 in floating point
+    return max(1, math.ceil(round(min_share * n_samples, 9)))
+
+
+def _eligible(all_models, candidate_models, col, max_noise, min_share):
     """Rows eligible as "best" for index `col`: (gap-selected, capped HDBSCAN)."""
+    min_size = min_cluster_size(all_models, min_share)
     hdbscan = all_models[all_models["model"] == "HDBSCAN"]
     if max_noise is not None and "noise" in hdbscan.columns:
         hdbscan = hdbscan[hdbscan["noise"] <= max_noise]
+    hdbscan = hdbscan[hdbscan["min_clust_size"] >= min_size]
     gap_sel = candidate_models[candidate_models[f"{col}_gap"] == 1]
+    gap_sel = gap_sel[gap_sel["min_clust_size"] >= min_size]
     return gap_sel, hdbscan
 
 
-def eligible_fits(all_models, candidate_models, max_noise=MAX_NOISE):
+def eligible_fits(
+    all_models, candidate_models, max_noise=MAX_NOISE, min_share=MIN_CLUSTER_SHARE
+):
     """Every eligible fit per index, all algorithms together, ranked best-first.
 
     Same eligibility as `selected_pools` (gap-selected k-means / AHC / LCA,
@@ -80,7 +111,9 @@ def eligible_fits(all_models, candidate_models, max_noise=MAX_NOISE):
     """
     out = {}
     for col, _, asc in INDEX_SPEC:
-        gap_sel, hdbscan = _eligible(all_models, candidate_models, col, max_noise)
+        gap_sel, hdbscan = _eligible(
+            all_models, candidate_models, col, max_noise, min_share
+        )
         out[col] = (
             pd.concat([gap_sel, hdbscan], ignore_index=True)
             .dropna(subset=[col])
@@ -90,7 +123,9 @@ def eligible_fits(all_models, candidate_models, max_noise=MAX_NOISE):
     return out
 
 
-def selected_pools(all_models, candidate_models, max_noise=MAX_NOISE):
+def selected_pools(
+    all_models, candidate_models, max_noise=MAX_NOISE, min_share=MIN_CLUSTER_SHARE
+):
     """Per-index gap-selected distance and LCA pools, ranked best-first.
 
     Which solutions count as "best": shared by `model_comparison_table`
@@ -117,7 +152,9 @@ def selected_pools(all_models, candidate_models, max_noise=MAX_NOISE):
     dist_by_index = {}
     lca_by_index = {}
     for col, _, asc in INDEX_SPEC:
-        gap_sel, hdbscan = _eligible(all_models, candidate_models, col, max_noise)
+        gap_sel, hdbscan = _eligible(
+            all_models, candidate_models, col, max_noise, min_share
+        )
         dist_pool = pd.concat(
             [gap_sel[gap_sel["model"].isin(["kmeans", "AHC"])], hdbscan],
             ignore_index=True,
@@ -134,6 +171,7 @@ def model_comparison_table(
     unbalanced_ratio=0.9,
     decimal=",",
     max_noise=MAX_NOISE,
+    min_share=MIN_CLUSTER_SHARE,
 ):
     """Build the Table 2 model-comparison frame from `process_dataset` output.
 
@@ -165,6 +203,9 @@ def model_comparison_table(
         Decimal separator for the formatted scores (',' for French style).
     max_noise : float or None
         HDBSCAN noise cap in percent, passed to `selected_pools`.
+    min_share : float or None
+        Smallest admissible cluster as a share of the sample, passed to
+        `selected_pools`.
 
     Returns
     -------
@@ -187,7 +228,7 @@ def model_comparison_table(
     # Gap-selected distance / LCA pools, ranked per index. Shared with the app's
     # solution picker via `selected_pools` so the table and the dropdown agree.
     dist_by_index, lca_by_index = selected_pools(
-        all_models, candidate_models, max_noise=max_noise
+        all_models, candidate_models, max_noise=max_noise, min_share=min_share
     )
 
     rows = []

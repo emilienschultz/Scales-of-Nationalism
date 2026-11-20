@@ -25,8 +25,15 @@ from sklearn.preprocessing import StandardScaler
 
 from src.app_viz import nmi_heatmap, pca_scatter, refit_labels
 from src.data_gen import SimConfig, generate_clusters
+from src.model_select import select_candidates
 from src.model_similarity import TRUTH_LABEL, best_fits_nmi, partition_similarity
-from src.tooling import INDEX_SPEC, MAX_NOISE, model_comparison_table, selected_pools
+from src.tooling import (
+    INDEX_SPEC,
+    MAX_NOISE,
+    MIN_CLUSTER_SHARE,
+    model_comparison_table,
+    selected_pools,
+)
 
 CACHE_DIR = Path(__file__).parent / "cache"
 CACHE_DIR.mkdir(exist_ok=True)
@@ -107,7 +114,9 @@ def list_cached():
 # --------------------------- solution selection ---------------------------
 
 
-def best_solutions(all_models, candidate_models, max_noise=MAX_NOISE):
+def best_solutions(
+    all_models, candidate_models, max_noise=MAX_NOISE, min_share=MIN_CLUSTER_SHARE
+):
     """Recover the best / second-best / best-LCA rows behind the comparison table.
 
     Uses the same gap-statistic-based selection as `model_comparison_table` (via
@@ -119,7 +128,7 @@ def best_solutions(all_models, candidate_models, max_noise=MAX_NOISE):
     validity indices.
     """
     dist_by_index, lca_by_index = selected_pools(
-        all_models, candidate_models, max_noise=max_noise
+        all_models, candidate_models, max_noise=max_noise, min_share=min_share
     )
 
     rows = []
@@ -243,6 +252,17 @@ with st.sidebar:
         "similarity and best-fits grid). 100 removes the cap. Applies "
         "immediately to the loaded run, without re-running it.",
     )
+    min_share = (
+        st.slider(
+            "Minimum cluster size (% of sample)",
+            0.0, 10.0, 100 * MIN_CLUSTER_SHARE, step=0.5,
+            help="A fit with a cluster smaller than this share of the sample "
+            "cannot be picked as a best solution: it removes partitions that "
+            "only isolate a few outliers. 0 removes the filter. Applies "
+            "immediately to the loaded run, without re-running it.",
+        )
+        / 100
+    )
 
 data_cfg = dict(
     n_samples=int(n_samples),
@@ -323,10 +343,25 @@ y_true = payload["y_true"]
 result = payload["result"]
 all_models = result["all_models"]
 
+# Gap selection recomputed from the stored gap values (cheap, no re-fit), so
+# cached runs follow the current selection rule and the minimum cluster size
+# set in the sidebar. Runs cached before the labels were stored keep theirs.
+if "pred_clust" in all_models.columns:
+    candidates = select_candidates(all_models, result["gap_values"], min_share)
+else:
+    candidates = result["candidate_models"]
+
 src_tag = "loaded from cache" if payload.get("from_cache") else "freshly computed"
 st.success(
     f"Run `{payload['key']}` — {src_tag}. Dataset: {df.shape[0]} × {df.shape[1]}."
 )
+if candidates.empty:
+    st.warning(
+        "No k-means / AHC / LCA configuration scores better than the uniform "
+        "null with clusters above the minimum size: the gap statistic finds no "
+        "cluster structure in this dataset. Only HDBSCAN fits (which have no "
+        "null test) can appear below."
+    )
 
 tab_clusters, tab_table, tab_similarity, tab_truth = st.tabs(
     [
@@ -348,7 +383,7 @@ with tab_clusters:
 
     with right:
         st.subheader("Best / second-best solution")
-        sols = best_solutions(all_models, result["candidate_models"], max_noise)
+        sols = best_solutions(all_models, candidates, max_noise, min_share)
         if sols.empty:
             st.caption("No gap-selectable solutions for this run.")
         else:
@@ -372,7 +407,11 @@ with tab_clusters:
 with tab_table:
     st.subheader("Model comparison — best & second-best by validity index")
     table = model_comparison_table(
-        all_models, result["candidate_models"], n_samples=len(df), max_noise=max_noise
+        all_models,
+        candidates,
+        n_samples=len(df),
+        max_noise=max_noise,
+        min_share=min_share,
     )
     st.dataframe(
         table.set_index(["Section", "Clustering Validity Index"]),
@@ -394,9 +433,10 @@ with tab_similarity:
     if "pred_clust" in all_models.columns:
         similarity = partition_similarity(
             all_models,
-            result["candidate_models"],
+            candidates,
             n_combo=PIPE_CFG["n_combo"],
             max_noise=max_noise,
+            min_share=min_share,
         )
     else:
         similarity = None
@@ -478,9 +518,10 @@ with tab_truth:
         data_n = StandardScaler().fit_transform(df) if PIPE_CFG["standardize"] else df
         grid = best_fits_nmi(
             all_models,
-            result["candidate_models"],
+            candidates,
             y_true=y_true,
             max_noise=max_noise,
+            min_share=min_share,
             data_n=data_n,
         )
         fits = grid["fits"]

@@ -2,6 +2,20 @@
 
 Log of the changes made to this project, newest first. Entries are added with the `/track` skill.
 
+## 2026-11-20 10:42 — New gap selection rule after the artifact review
+
+Summary: Review of the synthetic-data chain for artifacts, followed by three fixes to the gap selection. A k is now selected only if its gap beats the uniform null (gap > s) and no cluster holds less than 1% of the sample; among those, the smallest k within one s of the highest gap replaces the first-local-maximum rule, which stopped at k=2. Partitions isolating one outlier (829 / 1) no longer win Davies-Bouldin and Dunn. The default scenario is now 23 informative features, no redundant ones.
+
+- `src/model_select.py`: new rule in `get_gap`; `select_candidates` (stage 3, recomputable from stored `gap_values`)
+- `src/tooling.py`: `MIN_CLUSTER_SHARE = 0.01`, `min_cluster_size`; `min_share` argument on every selection function, applied to HDBSCAN too
+- `process_dataset.py`, `src/model_similarity.py`, `benchmark.py` (`SUMMARY_VERSION = 4`): use the new selection
+- `app.py`: selection recomputed at display time; slider "Minimum cluster size (% of sample)"; warning when nothing beats the null (not tested in the browser)
+- `src/data_gen.py`: defaults `n_informative=23`, `n_redundant=0`; `CLAUDE.md` updated
+
+Impact: no re-fit needed, cached app runs follow the new rule; rebuild benchmark summaries with `python benchmark.py --summarize-only`; `4_clustering.ipynb` will give different selections if re-run. Known limits: structureless data still gets a k on 3 to 12 of 23 configurations (the box null, not the threshold); HDBSCAN takes most "best distance" slots, often with 20–50% noise; Dunn still prefers k=2; Hamming AHC null is degenerate.
+
+Commit: `9e9a67a` (+ uncommitted changes)
+
 ## 2026-11-13 18:44 — NMI matrix of best fits vs true classes
 
 Summary: State of the changes to build a matrix to compare NMI: the app has a new tab showing, for each validity index, the four best distinct partitions across all algorithms, their pairwise NMI and their NMI with the synthetic true classes. The HDBSCAN noise cap is now a sidebar setting (default 50%). **Careful: the code has not been entirely properly tested. Especially the change regarding LCA should be rechecked** (in the matrix, LCA is ranked on indices recomputed on the standardized data, not the raw-data values of the pipeline).
